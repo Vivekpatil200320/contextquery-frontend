@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback, useTransition, memo } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const MAX_FILE_SIZE_MB = 20;
@@ -19,7 +19,13 @@ interface IngestedDoc {
 
 // ─── Citation Tab ────────────────────────────────────────────────────────────
 
-function CitationTab({ index, source }: { index: number; source: Source }) {
+const CitationTab = memo(function CitationTab({
+  index,
+  source,
+}: {
+  index: number;
+  source: Source;
+}) {
   const [expanded, setExpanded] = useState(false);
 
   return (
@@ -59,7 +65,7 @@ function CitationTab({ index, source }: { index: number; source: Source }) {
       )}
     </div>
   );
-}
+});
 
 // ─── Upload pulse indicator ───────────────────────────────────────────────────
 
@@ -75,11 +81,57 @@ function UploadSpinner() {
   );
 }
 
+// ─── Answer Panel (isolated so streaming re-renders don't hit the textarea) ──
+
+const AnswerPanel = memo(function AnswerPanel({
+  answer,
+  isStreaming,
+  sources,
+}: {
+  answer: string;
+  isStreaming: boolean;
+  sources: Source[];
+}) {
+  if (!answer && !isStreaming) return null;
+
+  return (
+    <section
+      className="space-y-6 border-t border-line pt-10"
+      aria-live="polite"
+      aria-label="Answer"
+    >
+      {/* Streaming cursor */}
+      <p className="text-[15px] leading-[1.75] whitespace-pre-wrap">
+        {answer}
+        {isStreaming && (
+          <span className="inline-block w-[2px] h-[1em] bg-ink-muted ml-0.5 align-middle animate-pulse" />
+        )}
+      </p>
+
+      {/* Citation tabs */}
+      {sources.length > 0 && (
+        <div className="pt-2">
+          <p className="font-mono text-[11px] tracking-[0.18em] text-ink-muted uppercase mb-3">
+            Sources
+          </p>
+          <div className="flex flex-wrap gap-0">
+            {sources.map((s, i) => (
+              <CitationTab key={i} index={i + 1} source={s} />
+            ))}
+          </div>
+          <p className="font-mono text-[10px] text-ink-muted/60 mt-2">
+            Click an index card to reveal the source passage.
+          </p>
+        </div>
+      )}
+    </section>
+  );
+});
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Home() {
   const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState("");
   const [uploadError, setUploadError] = useState("");
   const [ingestedDocs, setIngestedDocs] = useState<IngestedDoc[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -89,6 +141,9 @@ export default function Home() {
   const [sources, setSources] = useState<Source[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [queryError, setQueryError] = useState("");
+
+  // Low-priority transition for per-token answer updates — keeps input responsive
+  const [, startTransition] = useTransition();
 
   useEffect(() => {
     fetchDocuments();
@@ -130,7 +185,6 @@ export default function Home() {
 
     setIsUploading(true);
     setUploadError("");
-    setUploadProgress("Uploading…");
 
     const formData = new FormData();
     formData.append("file", file);
@@ -155,7 +209,6 @@ export default function Home() {
       setUploadError(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setIsUploading(false);
-      setUploadProgress("");
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
@@ -171,7 +224,8 @@ export default function Home() {
     }
   }
 
-  async function handleSubmit() {
+  // Stable reference — won't cause textarea to remount/rerender unnecessarily
+  const handleSubmit = useCallback(async () => {
     if (!question.trim() || isStreaming) return;
 
     setAnswer("");
@@ -206,9 +260,17 @@ export default function Home() {
           if (!line.startsWith("data: ")) continue;
           try {
             const event = JSON.parse(line.slice(6));
-            if (event.type === "sources") setSources(event.data);
-            else if (event.type === "token") setAnswer((prev) => prev + event.data);
-            else if (event.type === "done") setIsStreaming(false);
+            if (event.type === "sources") {
+              setSources(event.data);
+            } else if (event.type === "token") {
+              // Wrap in startTransition so token appends are low-priority
+              // and yield to any pending user input (keystrokes, clicks)
+              startTransition(() => {
+                setAnswer((prev) => prev + event.data);
+              });
+            } else if (event.type === "done") {
+              setIsStreaming(false);
+            }
           } catch {
             /* partial chunk boundary — skip */
           }
@@ -219,13 +281,17 @@ export default function Home() {
     } finally {
       setIsStreaming(false);
     }
-  }
+  }, [question, isStreaming, startTransition]);
 
-  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-      handleSubmit();
-    }
-  }
+  // Stable reference — avoids textarea getting a new onKeyDown prop every render
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        handleSubmit();
+      }
+    },
+    [handleSubmit]
+  );
 
   return (
     <main className="min-h-screen bg-paper text-ink">
@@ -347,39 +413,8 @@ export default function Home() {
           )}
         </section>
 
-        {/* ── Answer ───────────────────────────────────────────────────────── */}
-        {(answer || isStreaming) && (
-          <section
-            className="space-y-6 border-t border-line pt-10"
-            aria-live="polite"
-            aria-label="Answer"
-          >
-            {/* Streaming cursor */}
-            <p className="text-[15px] leading-[1.75] whitespace-pre-wrap">
-              {answer}
-              {isStreaming && (
-                <span className="inline-block w-[2px] h-[1em] bg-ink-muted ml-0.5 align-middle animate-pulse" />
-              )}
-            </p>
-
-            {/* Citation tabs */}
-            {sources.length > 0 && (
-              <div className="pt-2">
-                <p className="font-mono text-[11px] tracking-[0.18em] text-ink-muted uppercase mb-3">
-                  Sources
-                </p>
-                <div className="flex flex-wrap gap-0">
-                  {sources.map((s, i) => (
-                    <CitationTab key={i} index={i + 1} source={s} />
-                  ))}
-                </div>
-                <p className="font-mono text-[10px] text-ink-muted/60 mt-2">
-                  Click an index card to reveal the source passage.
-                </p>
-              </div>
-            )}
-          </section>
-        )}
+        {/* ── Answer (isolated component — streaming updates won't re-render textarea) */}
+        <AnswerPanel answer={answer} isStreaming={isStreaming} sources={sources} />
 
         {/* ── Footer ───────────────────────────────────────────────────────── */}
         <footer className="border-t border-line pt-6">
