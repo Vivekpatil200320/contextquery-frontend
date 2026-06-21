@@ -128,3 +128,24 @@
     @apply font-sans;
   }
 }
+
+/* ─── ContextQuery brand tokens ─────────────────────────────────────────── */
+
+@theme {
+  --color-paper: #f1f0ec;
+  --color-ink: #1c1b19;
+  --color-ink-muted: #6b6862;
+  --color-line: #d8d5cc;
+  --color-signal: #1e3a5f;
+  --color-signal-soft: #e4ebf2;
+
+  --font-display: var(--font-fraunces), Georgia, serif;
+  --font-body: var(--font-plex-sans), system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+}
