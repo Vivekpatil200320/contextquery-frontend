@@ -3,6 +3,8 @@
 import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 interface Source {
   filename: string;
   chunk_index: number;
@@ -35,7 +37,7 @@ export default function Home() {
 
   async function fetchDocuments() {
     try {
-      const res = await fetch("http://localhost:8000/api/documents");
+      const res = await fetch(`${API_BASE}/api/documents`);
       const data = await res.json();
       setIngestedDocs(
         data.documents.map((d: any) => ({
@@ -51,7 +53,7 @@ export default function Home() {
 
   async function handleDelete(documentId: string) {
     try {
-      await fetch(`http://localhost:8000/api/documents/${documentId}`, {
+      await fetch(`${API_BASE}/api/documents/${documentId}`, {
         method: "DELETE",
       });
       setIngestedDocs((prev) => prev.filter((d) => d.documentId !== documentId));
@@ -77,7 +79,7 @@ export default function Home() {
     formData.append("file", file);
 
     try {
-      const response = await fetch("http://localhost:8000/api/ingest", {
+      const response = await fetch(`${API_BASE}/api/ingest`, {
         method: "POST",
         body: formData,
       });
@@ -109,7 +111,7 @@ export default function Home() {
     setIsStreaming(true);
 
     try {
-      const response = await fetch("http://localhost:8000/api/query/stream", {
+      const response = await fetch(`${API_BASE}/api/query/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question }),
