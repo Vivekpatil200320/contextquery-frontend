@@ -17,6 +17,27 @@ interface IngestedDoc {
   chunkCount: number;
 }
 
+interface QueryStats {
+  chunksRetrieved: number;
+  chunksUsed: number;
+  mode: "semantic" | "hybrid";
+  elapsedMs: number;
+}
+
+interface QueryHistoryItem {
+  question: string;
+  answer: string;
+  sources: Source[];
+  mode: "semantic" | "hybrid";
+  timestamp: Date;
+}
+
+interface UploadProgress {
+  current: number;
+  total: number;
+  filename: string;
+}
+
 // ─── Citation Tab ────────────────────────────────────────────────────────────
 
 const CitationTab = memo(function CitationTab({
@@ -67,31 +88,27 @@ const CitationTab = memo(function CitationTab({
   );
 });
 
-// ─── Upload pulse indicator ───────────────────────────────────────────────────
-
-function UploadSpinner() {
-  return (
-    <span className="inline-flex items-center gap-1.5 font-mono text-xs text-signal">
-      <span className="relative flex size-2">
-        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-signal opacity-60" />
-        <span className="relative inline-flex rounded-full size-2 bg-signal" />
-      </span>
-      Processing…
-    </span>
-  );
-}
-
 // ─── Answer Panel (isolated so streaming re-renders don't hit the textarea) ──
 
 const AnswerPanel = memo(function AnswerPanel({
   answer,
   isStreaming,
   sources,
+  queryStats,
 }: {
   answer: string;
   isStreaming: boolean;
   sources: Source[];
+  queryStats: QueryStats | null;
 }) {
+  const [copied, setCopied] = useState(false);
+
+  function handleCopy() {
+    navigator.clipboard.writeText(answer).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
   if (!answer && !isStreaming) return null;
 
   return (
@@ -100,13 +117,30 @@ const AnswerPanel = memo(function AnswerPanel({
       aria-live="polite"
       aria-label="Answer"
     >
-      {/* Streaming cursor */}
-      <p className="text-[15px] leading-[1.75] whitespace-pre-wrap">
-        {answer}
-        {isStreaming && (
-          <span className="inline-block w-[2px] h-[1em] bg-ink-muted ml-0.5 align-middle animate-pulse" />
+      {/* Answer text with copy button */}
+      <div className="relative">
+        {!isStreaming && answer && (
+          <button
+            onClick={handleCopy}
+            className="absolute top-0 right-0 font-mono text-[11px] text-ink-muted hover:text-ink transition-colors"
+          >
+            {copied ? "copied" : "copy"}
+          </button>
         )}
-      </p>
+        <p className="text-[15px] leading-[1.75] whitespace-pre-wrap pr-12">
+          {answer}
+          {isStreaming && (
+            <span className="inline-block w-[2px] h-[1em] bg-ink-muted ml-0.5 align-middle animate-pulse" />
+          )}
+        </p>
+      </div>
+
+      {/* Retrieval stats bar */}
+      {queryStats && !isStreaming && (
+        <p className="font-mono text-[11px] text-ink-muted">
+          {queryStats.chunksRetrieved} chunks retrieved · {queryStats.chunksUsed} used · {queryStats.mode} · {(queryStats.elapsedMs / 1000).toFixed(1)}s
+        </p>
+      )}
 
       {/* Citation tabs */}
       {sources.length > 0 && (
@@ -133,7 +167,9 @@ const AnswerPanel = memo(function AnswerPanel({
 export default function Home() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [ingestedDocs, setIngestedDocs] = useState<IngestedDoc[]>([]);
+  const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [question, setQuestion] = useState("");
@@ -141,6 +177,14 @@ export default function Home() {
   const [sources, setSources] = useState<Source[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [queryError, setQueryError] = useState("");
+  const [retrievalMode, setRetrievalMode] = useState<"semantic" | "hybrid">("semantic");
+  const [queryStats, setQueryStats] = useState<QueryStats | null>(null);
+  const [queryHistory, setQueryHistory] = useState<QueryHistoryItem[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  const currentAnswerRef = useRef("");
+  const currentSourcesRef = useRef<Source[]>([]);
+  const queryStartRef = useRef<number>(0);
 
   // Low-priority transition for per-token answer updates — keeps input responsive
   const [, startTransition] = useTransition();
@@ -167,50 +211,88 @@ export default function Home() {
     }
   }
 
-  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  async function handleFilesUpload(files: File[]) {
+    const valid: File[] = [];
+    for (const file of files) {
+      const name = file.name.toLowerCase();
+      if (!name.endsWith(".pdf") && !name.endsWith(".docx")) {
+        setUploadError(`${file.name}: Only PDF and DOCX files are supported.`);
+        return;
+      }
+      if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
+        setUploadError(
+          `${file.name}: File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Limit is ${MAX_FILE_SIZE_MB} MB.`
+        );
+        return;
+      }
+      valid.push(file);
+    }
 
-    const name = file.name.toLowerCase();
-    if (!name.endsWith(".pdf") && !name.endsWith(".docx")) {
-      setUploadError("Only PDF and DOCX files are supported.");
-      return;
-    }
-    if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
-      setUploadError(
-        `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Limit is ${MAX_FILE_SIZE_MB} MB.`
-      );
-      return;
-    }
+    if (valid.length === 0) return;
 
     setIsUploading(true);
     setUploadError("");
 
-    const formData = new FormData();
-    formData.append("file", file);
+    for (let i = 0; i < valid.length; i++) {
+      const file = valid[i];
+      setUploadProgress({ current: i + 1, total: valid.length, filename: file.name });
 
-    try {
-      const response = await fetch(`${API_BASE}/api/ingest`, {
-        method: "POST",
-        body: formData,
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || "Upload failed");
+      const formData = new FormData();
+      formData.append("file", file);
 
-      setIngestedDocs((prev) => [
-        ...prev,
-        {
-          documentId: data.document_id,
-          filename: data.filename,
-          chunkCount: data.chunk_count,
-        },
-      ]);
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : "Upload failed");
-    } finally {
-      setIsUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+      try {
+        const response = await fetch(`${API_BASE}/api/ingest`, {
+          method: "POST",
+          body: formData,
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Upload failed");
+
+        setIngestedDocs((prev) => [
+          ...prev,
+          {
+            documentId: data.document_id,
+            filename: data.filename,
+            chunkCount: data.chunk_count,
+          },
+        ]);
+      } catch (err) {
+        setUploadError(err instanceof Error ? err.message : "Upload failed");
+        break;
+      }
     }
+
+    setIsUploading(false);
+    setUploadProgress(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function handleFileInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    if (files.length > 0) handleFilesUpload(files);
+  }
+
+  function handleDragOver(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setIsDragOver(true);
+  }
+
+  function handleDragLeave(e: React.DragEvent<HTMLDivElement>) {
+    // Only clear when leaving the zone entirely, not when entering a child
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      e.preventDefault();
+      setIsDragOver(false);
+    }
+  }
+
+  function handleDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setIsDragOver(false);
+    const files = Array.from(e.dataTransfer.files).filter((f) => {
+      const n = f.name.toLowerCase();
+      return n.endsWith(".pdf") || n.endsWith(".docx");
+    });
+    if (files.length > 0) handleFilesUpload(files);
   }
 
   async function handleDelete(documentId: string) {
@@ -228,16 +310,21 @@ export default function Home() {
   const handleSubmit = useCallback(async () => {
     if (!question.trim() || isStreaming) return;
 
+    currentAnswerRef.current = "";
+    currentSourcesRef.current = [];
+    queryStartRef.current = Date.now();
+
     setAnswer("");
     setSources([]);
     setQueryError("");
+    setQueryStats(null);
     setIsStreaming(true);
 
     try {
       const response = await fetch(`${API_BASE}/api/query/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({ question, retrieval_mode: retrievalMode }),
       });
 
       if (!response.ok || !response.body) {
@@ -261,15 +348,47 @@ export default function Home() {
           try {
             const event = JSON.parse(line.slice(6));
             if (event.type === "sources") {
-              setSources(event.data);
+              const src: Source[] = Array.isArray(event.data) ? event.data : [];
+              currentSourcesRef.current = src;
+              setSources(src);
+              setQueryStats({
+                chunksRetrieved: event.chunks_retrieved ?? src.length,
+                chunksUsed: event.chunks_used ?? src.length,
+                mode: retrievalMode,
+                elapsedMs: Date.now() - queryStartRef.current,
+              });
             } else if (event.type === "token") {
               // Wrap in startTransition so token appends are low-priority
               // and yield to any pending user input (keystrokes, clicks)
+              currentAnswerRef.current += event.data;
               startTransition(() => {
                 setAnswer((prev) => prev + event.data);
               });
             } else if (event.type === "done") {
+              const elapsed = Date.now() - queryStartRef.current;
               setIsStreaming(false);
+              setQueryStats((prev) =>
+                prev
+                  ? { ...prev, elapsedMs: elapsed }
+                  : {
+                      chunksRetrieved: currentSourcesRef.current.length,
+                      chunksUsed: currentSourcesRef.current.length,
+                      mode: retrievalMode,
+                      elapsedMs: elapsed,
+                    }
+              );
+              setQueryHistory((prev) =>
+                [
+                  {
+                    question,
+                    answer: currentAnswerRef.current,
+                    sources: currentSourcesRef.current,
+                    mode: retrievalMode,
+                    timestamp: new Date(),
+                  },
+                  ...prev,
+                ].slice(0, 5)
+              );
             }
           } catch {
             /* partial chunk boundary — skip */
@@ -281,7 +400,7 @@ export default function Home() {
     } finally {
       setIsStreaming(false);
     }
-  }, [question, isStreaming, startTransition]);
+  }, [question, isStreaming, startTransition, retrievalMode]);
 
   // Stable reference — avoids textarea getting a new onKeyDown prop every render
   const handleKeyDown = useCallback(
@@ -292,6 +411,8 @@ export default function Home() {
     },
     [handleSubmit]
   );
+
+  const totalChunks = ingestedDocs.reduce((sum, d) => sum + d.chunkCount, 0);
 
   return (
     <main className="min-h-screen bg-paper text-ink">
@@ -318,9 +439,23 @@ export default function Home() {
             className="font-mono text-[11px] tracking-[0.18em] text-ink-muted uppercase"
           >
             Intake
+            {ingestedDocs.length > 0 && (
+              <span className="normal-case tracking-normal ml-2 text-ink-muted/70">
+                ({ingestedDocs.length} {ingestedDocs.length === 1 ? "document" : "documents"} · {totalChunks} chunks)
+              </span>
+            )}
           </h2>
 
-          <div className="border border-dashed border-line rounded-lg p-5 space-y-4 transition-colors hover:border-ink-muted">
+          <div
+            className={`border border-dashed rounded-lg p-5 space-y-4 transition-colors ${
+              isDragOver
+                ? "border-signal bg-signal-soft/20"
+                : "border-line hover:border-ink-muted"
+            }`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
             {/* File input row */}
             <div className="flex flex-wrap items-center justify-between gap-3">
               <input
@@ -328,7 +463,8 @@ export default function Home() {
                 id="file-upload"
                 type="file"
                 accept=".pdf,.docx"
-                onChange={handleFileUpload}
+                multiple
+                onChange={handleFileInputChange}
                 disabled={isUploading}
                 className="text-sm font-mono text-ink-muted file:mr-3 file:py-1 file:px-3 file:rounded file:border file:border-line file:bg-signal-soft file:text-signal file:font-mono file:text-xs file:cursor-pointer hover:file:border-signal transition-colors disabled:opacity-50"
               />
@@ -337,11 +473,31 @@ export default function Home() {
               </span>
             </div>
 
-            {isUploading && <UploadSpinner />}
+            {/* Upload progress */}
+            {isUploading && (
+              <span className="inline-flex items-center gap-1.5 font-mono text-xs text-signal">
+                <span className="relative flex size-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-signal opacity-60" />
+                  <span className="relative inline-flex rounded-full size-2 bg-signal" />
+                </span>
+                {uploadProgress && uploadProgress.total > 1
+                  ? `Uploading ${uploadProgress.current} of ${uploadProgress.total}: ${uploadProgress.filename}`
+                  : uploadProgress
+                  ? `Uploading: ${uploadProgress.filename}`
+                  : "Processing…"}
+              </span>
+            )}
 
             {uploadError && (
               <p className="font-mono text-[11px] text-red-700" role="alert">
                 {uploadError}
+              </p>
+            )}
+
+            {/* Empty state */}
+            {!isUploading && ingestedDocs.length === 0 && (
+              <p className="font-mono text-[11px] text-ink-muted/60 italic">
+                No documents yet. Upload a PDF or DOCX to begin.
               </p>
             )}
 
@@ -392,7 +548,7 @@ export default function Home() {
             className="w-full bg-transparent border border-line rounded-lg p-4 text-sm leading-relaxed resize-none focus:outline-none focus:border-signal placeholder:text-ink-muted/50 transition-colors disabled:opacity-60"
           />
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 flex-wrap">
             <button
               id="ask-button"
               onClick={handleSubmit}
@@ -401,20 +557,106 @@ export default function Home() {
             >
               {isStreaming ? "Reading…" : "Ask"}
             </button>
+
+            {/* Retrieval mode toggle */}
+            <div className="flex items-center border border-line rounded-full overflow-hidden">
+              <button
+                onClick={() => setRetrievalMode("semantic")}
+                disabled={isStreaming}
+                className={`font-mono text-[10px] px-3 py-1 transition-colors disabled:cursor-not-allowed ${
+                  retrievalMode === "semantic"
+                    ? "bg-signal text-paper"
+                    : "text-ink-muted hover:text-ink"
+                }`}
+              >
+                Semantic
+              </button>
+              <button
+                onClick={() => setRetrievalMode("hybrid")}
+                disabled={isStreaming}
+                className={`font-mono text-[10px] px-3 py-1 transition-colors disabled:cursor-not-allowed ${
+                  retrievalMode === "hybrid"
+                    ? "bg-signal text-paper"
+                    : "text-ink-muted hover:text-ink"
+                }`}
+              >
+                Hybrid
+              </button>
+            </div>
+
             <span className="font-mono text-[11px] text-ink-muted">
               {isStreaming ? "" : "⌘ Return to submit"}
             </span>
           </div>
 
           {queryError && (
-            <p className="font-mono text-[11px] text-red-700" role="alert">
-              {queryError}
-            </p>
+            <div className="flex items-center gap-3">
+              <p className="font-mono text-[11px] text-red-700" role="alert">
+                {queryError}
+              </p>
+              <button
+                onClick={handleSubmit}
+                className="font-mono text-[11px] text-ink-muted hover:text-ink transition-colors"
+              >
+                Retry
+              </button>
+            </div>
           )}
         </section>
 
         {/* ── Answer (isolated component — streaming updates won't re-render textarea) */}
-        <AnswerPanel answer={answer} isStreaming={isStreaming} sources={sources} />
+        <AnswerPanel
+          answer={answer}
+          isStreaming={isStreaming}
+          sources={sources}
+          queryStats={queryStats}
+        />
+
+        {/* ── Query History ─────────────────────────────────────────────────── */}
+        {queryHistory.length > 0 && (
+          <section className="space-y-3 border-t border-line pt-10">
+            <button
+              onClick={() => setHistoryOpen((v) => !v)}
+              className="font-mono text-[11px] tracking-[0.18em] text-ink-muted uppercase flex items-center gap-2"
+            >
+              Previous queries
+              <span className="text-ink-muted/50 normal-case tracking-normal">
+                {historyOpen ? "▲" : "▼"}
+              </span>
+            </button>
+            {historyOpen && (
+              <div>
+                {queryHistory.map((item, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center justify-between gap-3 py-2.5 border-b border-line last:border-b-0"
+                  >
+                    <button
+                      onClick={() => setQuestion(item.question)}
+                      className="font-mono text-xs text-ink-muted hover:text-ink transition-colors text-left truncate max-w-xs"
+                      title={item.question}
+                    >
+                      {item.question.length > 60
+                        ? item.question.slice(0, 60) + "…"
+                        : item.question}
+                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="font-mono text-[10px] text-signal border border-signal/30 px-1.5 py-0.5 rounded">
+                        {item.mode}
+                      </span>
+                      <span className="font-mono text-[10px] text-ink-muted/60">
+                        {item.timestamp.toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
         {/* ── Footer ───────────────────────────────────────────────────────── */}
         <footer className="border-t border-line pt-6">
