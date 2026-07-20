@@ -1,6 +1,7 @@
 {
   "name": "contextquery-frontend",
   "version": "0.1.0",
+  "description": "Next.js interface for ContextQuery — upload documents, ask questions, get grounded answers with traceable citations.",
   "private": true,
   "scripts": {
     "dev": "next dev",
