@@ -189,10 +189,6 @@ export default function Home() {
   // Low-priority transition for per-token answer updates — keeps input responsive
   const [, startTransition] = useTransition();
 
-  useEffect(() => {
-    fetchDocuments();
-  }, []);
-
   async function fetchDocuments() {
     try {
       const res = await fetch(`${API_BASE}/api/documents`);
@@ -210,6 +206,10 @@ export default function Home() {
       // silent — backend may not be reachable on first load
     }
   }
+
+  useEffect(() => {
+    fetchDocuments();
+  }, []);
 
   async function handleFilesUpload(files: File[]) {
     const valid: File[] = [];
