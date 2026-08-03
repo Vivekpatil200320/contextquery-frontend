@@ -10,6 +10,8 @@ export function ConversationSidebar({
   onNewChat,
   onRename,
   onDelete,
+  isOpen,
+  onClose,
 }: {
   conversations: Conversation[];
   activeId: string | null;
@@ -17,6 +19,8 @@ export function ConversationSidebar({
   onNewChat: () => void;
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
+  isOpen: boolean;
+  onClose: () => void;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
@@ -35,15 +39,37 @@ export function ConversationSidebar({
   }
 
   return (
-    <aside className="w-60 shrink-0 border-r border-line px-4 py-8 flex flex-col gap-5">
-      <button
-        onClick={onNewChat}
-        className="font-mono text-[11px] tracking-[0.12em] uppercase border border-line rounded-md px-3 py-2 text-ink-muted hover:border-signal hover:text-signal transition-colors"
-      >
-        + New chat
-      </button>
+    <>
+      {isOpen && (
+        <div
+          className="fixed inset-0 bg-ink/30 z-30 md:hidden"
+          onClick={onClose}
+          aria-hidden="true"
+        />
+      )}
 
-      <div className="space-y-1 overflow-y-auto">
+      <aside
+        className={`fixed md:static inset-y-0 left-0 z-40 w-72 md:w-60 md:shrink-0 border-r border-line px-4 py-8 flex flex-col gap-5 bg-paper transition-transform duration-200 ease-out md:translate-x-0 ${
+          isOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onNewChat}
+            className="flex-1 font-mono text-[11px] tracking-[0.12em] uppercase border border-line rounded-md px-3 py-2 text-ink-muted hover:border-signal hover:text-signal transition-colors"
+          >
+            + New chat
+          </button>
+          <button
+            onClick={onClose}
+            aria-label="Close conversations"
+            className="md:hidden font-mono text-sm text-ink-muted hover:text-ink border border-line rounded-md px-2.5 py-2"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="space-y-1 overflow-y-auto">
         <p className="font-mono text-[10px] tracking-[0.18em] text-ink-muted/60 uppercase px-1 pb-1">
           Conversations
         </p>
@@ -114,7 +140,7 @@ export function ConversationSidebar({
                 <button
                   onClick={() => setConfirmingId(conversation.id)}
                   title="Delete conversation"
-                  className="font-mono text-[10px] text-ink-muted hover:text-red-700 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                  className="font-mono text-[10px] text-ink-muted hover:text-red-700 shrink-0 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity"
                 >
                   ×
                 </button>
@@ -123,6 +149,7 @@ export function ConversationSidebar({
           );
         })}
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

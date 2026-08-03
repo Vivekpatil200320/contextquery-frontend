@@ -214,6 +214,7 @@ export default function Home() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   const [question, setQuestion] = useState("");
   const [askedQuestion, setAskedQuestion] = useState("");
@@ -280,6 +281,7 @@ export default function Home() {
     } catch {
       setQueryError("Couldn't load that conversation.");
     }
+    setIsSidebarOpen(false);
   }
 
   function handleNewChat() {
@@ -288,6 +290,7 @@ export default function Home() {
     setActiveId(null);
     setMessages([]);
     setQuestion("");
+    setIsSidebarOpen(false);
   }
 
   async function handleRename(id: string, title: string) {
@@ -554,10 +557,22 @@ export default function Home() {
         onNewChat={handleNewChat}
         onRename={handleRename}
         onDelete={handleDeleteConversation}
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
       />
 
       <div className="flex-1 min-w-0">
-        <div className="max-w-2xl mx-auto px-6 py-16 space-y-14">
+        <div className="flex items-center justify-between px-4 pt-4 md:hidden">
+          <button
+            onClick={() => setIsSidebarOpen(true)}
+            aria-label="Open conversations"
+            className="font-mono text-[11px] tracking-[0.12em] uppercase border border-line rounded-md px-3 py-2 text-ink-muted hover:border-signal hover:text-signal transition-colors"
+          >
+            ☰ Chats
+          </button>
+        </div>
+
+        <div className="max-w-2xl mx-auto px-6 py-10 md:py-16 space-y-14">
 
           {/* ── Header ───────────────────────────────────────────────────── */}
           <header className="space-y-4 border-b border-line pb-10">
